@@ -3,6 +3,8 @@ import logging
 import requests
 import io
 import re
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot.types import InputMediaPhoto
 
@@ -14,7 +16,12 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+PORT = int(os.environ.get("PORT", 10000))
+
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+)
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -58,27 +65,47 @@ SUPER_PROMPT = """Ты — контент-директор SUNKAR FINANCE, фи�
 
 5. ПРОМПТЫ ДЛЯ КАРТИНОК
 [IMAGE_PROMPTS]
-1. Dark navy #060D1F background, neon green #00E676 glowing headline, pain-point topic, fintech professional dramatic lighting
-2. Dark navy fintech infographic, large neon green statistic, gradient green-to-blue accent lines
-3. Dark navy slide, APPROVED neon green text, 1 DAY green badge, modern fintech design
+1. Dark navy #060D1F background, neon green #00E676 glowing headline, fintech professional
+2. Dark navy fintech infographic, large neon green statistic, gradient green-to-blue accents
+3. Dark navy slide, APPROVED neon green text, 1 DAY green badge, modern fintech
 4. Dark navy product cards, neon green loan amounts 10M 50M 30M tenge, fintech UI
-5. Dark navy CTA slide, WhatsApp green button glowing, Astana Kazakhstan, neon green call-to-action
+5. Dark navy CTA slide, WhatsApp green button glowing, Astana Kazakhstan
 """
 
 
+# ── HTTP-сервер для Render (держит порт открытым) ──
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"SUNKAR FINANCE BOT is running")
+
+    def log_message(self, *args):
+        pass  # отключаем логи HTTP
+
+
+def run_http_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    logger.info(f"HTTP сервер запущен на порту {PORT}")
+    server.serve_forever()
+
+
+# ── Gemini API ──
 def ask_gemini(prompt: str) -> str:
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     resp = requests.post(GEMINI_URL, json=payload, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
+# ── Pollinations ──
 def generate_image(prompt: str) -> bytes:
     encoded = requests.utils.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1080&height=1080&nologo=true&seed=42"
+    url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width=1080&height=1080&nologo=true&seed=42"
+    )
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
     return resp.content
@@ -96,6 +123,7 @@ def parse_image_prompts(text: str) -> list:
     return prompts
 
 
+# ── Команды бота ──
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.reply_to(message,
@@ -122,22 +150,21 @@ def image_command(message):
         return
 
     msg = bot.reply_to(message, "🎨 Создаю 5 картинок... (~30 сек)")
-
     try:
         raw = ask_gemini(
             f"Создай 5 image prompts на английском для карусели Instagram на тему: {topic}\n"
-            "Стиль: dark navy #060D1F, neon green #00E676, blue #2979FF, bold fintech, glowing effects.\n"
+            "Стиль: dark navy #060D1F, neon green #00E676, blue #2979FF, bold fintech.\n"
             "Формат строго:\n[IMAGE_PROMPTS]\n1. ...\n2. ...\n3. ...\n4. ...\n5. ..."
         )
         prompts = parse_image_prompts(raw)
 
         if len(prompts) < 3:
             prompts = [
-                f"Dark navy fintech slide, neon green headline about {topic}, dramatic lighting",
-                f"Dark navy infographic, large neon green statistic about {topic}",
+                f"Dark navy fintech slide, neon green headline about {topic}",
+                f"Dark navy infographic, neon green statistic about {topic}",
                 "Dark navy approval slide, APPROVED neon green, 1 DAY badge",
                 "Dark navy product cards, neon green amounts 10M 50M 30M tenge",
-                "Dark navy CTA slide, WhatsApp green button glowing, Sunkar Finance"
+                "Dark navy CTA slide, WhatsApp green button, Sunkar Finance"
             ]
         while len(prompts) < 5:
             prompts.append(prompts[-1])
@@ -154,9 +181,6 @@ def image_command(message):
         bot.send_media_group(message.chat.id, media)
         bot.send_message(message.chat.id, "✅ Готово! Загружай в Instagram.")
 
-    except requests.exceptions.Timeout:
-        bot.edit_message_text("⏱ Сервис картинок не отвечает. Попробуй через минуту.",
-                              message.chat.id, msg.message_id)
     except Exception as e:
         logger.error(f"[image] {e}")
         bot.edit_message_text(f"❌ Ошибка: {str(e)[:200]}",
@@ -178,5 +202,12 @@ def handle_message(message):
                               message.chat.id, msg.message_id)
 
 
-logger.info("🦅 SUNKAR FINANCE BOT — запущен")
-bot.infinity_polling()
+# ── Запуск ──
+if __name__ == "__main__":
+    # HTTP сервер в отдельном потоке
+    t = threading.Thread(target=run_http_server, daemon=True)
+    t.start()
+
+    logger.info("🦅 SUNKAR FINANCE BOT — запущен")
+    bot.infinity_polling()
+    
