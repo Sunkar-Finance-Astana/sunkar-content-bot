@@ -18,7 +18,7 @@ PORT = int(os.environ.get("PORT", 10000))
 
 MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
 SUPER_PROMPT = """Ты — контент-директор SUNKAR FINANCE, финтех-компании в Астане.
 
@@ -69,7 +69,6 @@ SUPER_PROMPT = """Ты — контент-директор SUNKAR FINANCE, фи�
 
 
 def ask_gemini(prompt: str) -> str:
-    """Вызов Gemini с retry и fallback на другие модели."""
     for model in MODELS:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -79,24 +78,19 @@ def ask_gemini(prompt: str) -> str:
             try:
                 payload = {"contents": [{"parts": [{"text": prompt}]}]}
                 resp = requests.post(url, json=payload, timeout=30)
-
                 if resp.status_code == 429:
                     wait = 5 * (attempt + 1)
                     logger.warning(f"{model} — 429, жду {wait} сек...")
                     time.sleep(wait)
                     continue
-
                 resp.raise_for_status()
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
-
             except Exception as e:
                 logger.error(f"{model} попытка {attempt+1}: {e}")
                 if attempt < 2:
                     time.sleep(3)
-
-        logger.warning(f"{model} не ответил, пробую следующую модель...")
-
+        logger.warning(f"{model} не ответил, пробую следующую...")
     raise Exception("Все модели Gemini перегружены. Попробуй через минуту.")
 
 
@@ -157,7 +151,6 @@ def image_command(message):
     if not topic:
         bot.reply_to(message, "Пример: /image Кредит под залог авто")
         return
-
     msg = bot.reply_to(message, "🎨 Создаю 5 картинок... (~30 сек)")
     try:
         raw = ask_gemini(
@@ -187,7 +180,6 @@ def image_command(message):
         bot.delete_message(message.chat.id, msg.message_id)
         bot.send_media_group(message.chat.id, media)
         bot.send_message(message.chat.id, "✅ Готово! Загружай в Instagram.")
-
     except Exception as e:
         logger.error(f"[image] {e}")
         bot.edit_message_text(f"❌ {str(e)[:200]}", message.chat.id, msg.message_id)
@@ -208,6 +200,10 @@ def handle_message(message):
 
 
 if __name__ == "__main__":
+    # Сбрасываем старые вебхуки и сессии
+    bot.remove_webhook()
+    time.sleep(1)
+    
     threading.Thread(target=run_http_server, daemon=True).start()
     logger.info("🦅 SUNKAR FINANCE BOT — запущен")
-    bot.infinity_polling()
+    bot.infinity_polling(timeout=20, long_polling_timeout=10)
