@@ -13,10 +13,11 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 PORT = int(os.environ.get("PORT", 10000))
 
-MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
 
@@ -68,30 +69,35 @@ SUPER_PROMPT = """Ты — контент-директор SUNKAR FINANCE, фи�
 """
 
 
-def ask_gemini(prompt: str) -> str:
-    for model in MODELS:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent?key={GEMINI_KEY}"
-        )
-        for attempt in range(3):
-            try:
-                payload = {"contents": [{"parts": [{"text": prompt}]}]}
-                resp = requests.post(url, json=payload, timeout=30)
-                if resp.status_code == 429:
-                    wait = 5 * (attempt + 1)
-                    logger.warning(f"{model} — 429, жду {wait} сек...")
-                    time.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            except Exception as e:
-                logger.error(f"{model} попытка {attempt+1}: {e}")
-                if attempt < 2:
-                    time.sleep(3)
-        logger.warning(f"{model} не ответил, пробую следующую...")
-    raise Exception("Все модели Gemini перегружены. Попробуй через минуту.")
+def ask_groq(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 2000,
+        "temperature": 0.8
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 429:
+                wait = 5 * (attempt + 1)
+                logger.warning(f"Groq — 429, жду {wait} сек...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Groq попытка {attempt+1}: {e}")
+            if attempt < 2:
+                time.sleep(3)
+    raise Exception("Groq не отвечает. Попробуй через минуту.")
 
 
 def generate_image(prompt: str) -> bytes:
@@ -107,7 +113,7 @@ def parse_image_prompts(text: str) -> list:
     block = match.group(1) if match else text
     prompts = []
     for line in block.strip().splitlines():
-        m = re.match(r'^\d+[\.\)]\s+(.+)', line.strip())
+        m = re.match(r'^\d+[\.\\)]\s+(.+)', line.strip())
         if m:
             prompts.append(m.group(1).strip())
     return prompts
@@ -153,7 +159,7 @@ def image_command(message):
         return
     msg = bot.reply_to(message, "🎨 Создаю 5 картинок... (~30 сек)")
     try:
-        raw = ask_gemini(
+        raw = ask_groq(
             f"Создай 5 image prompts на английском для карусели Instagram на тему: {topic}\n"
             "Стиль: dark navy #060D1F, neon green #00E676, blue #2979FF, bold fintech.\n"
             "Формат строго:\n[IMAGE_PROMPTS]\n1. ...\n2. ...\n3. ...\n4. ...\n5. ..."
@@ -190,7 +196,7 @@ def handle_message(message):
     topic = message.text.strip()
     msg = bot.reply_to(message, "⏳ Генерирую контент... (может занять 10-15 сек)")
     try:
-        result = ask_gemini(SUPER_PROMPT.format(topic=topic))
+        result = ask_groq(SUPER_PROMPT.format(topic=topic))
         bot.delete_message(message.chat.id, msg.message_id)
         for chunk in [result[i:i+4000] for i in range(0, len(result), 4000)]:
             bot.send_message(message.chat.id, chunk)
@@ -200,10 +206,9 @@ def handle_message(message):
 
 
 if __name__ == "__main__":
-    # Сбрасываем старые вебхуки и сессии
     bot.remove_webhook()
     time.sleep(1)
-    
+
     threading.Thread(target=run_http_server, daemon=True).start()
-    logger.info("🦅 SUNKAR FINANCE BOT — запущен")
+    logger.info("🦅 SUNKAR FINANCE BOT — запущен на Groq")
     bot.infinity_polling(timeout=20, long_polling_timeout=10)
